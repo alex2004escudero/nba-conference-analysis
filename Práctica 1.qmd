@@ -1,0 +1,440 @@
+---
+title: "Práctica 1"
+format:
+html:
+embed-resources: true
+editor: visual
+author: **Alejandro Escudero Repiso**
+---
+
+## Introducción
+
+El presente trabajo tiene como objetivo aplicar distintas técnicas de captura, tratamiento y análisis de datos no estructurados empleando el lenguaje R. A lo largo de los tres bloques que componen la práctica se abordan diferentes métodos de obtención de información, desde archivos locales en formato JSON, hasta peticiones a APIs y extracción web mediante hojas de cálculo.
+
+El estudio se centra en la evolución de las victorias por conferencia en la NBA, comparando el rendimiento histórico entre la Conferencia Este y la Conferencia Oeste. A partir de la hipótesis de que el dominio entre ambas ha oscilado a lo largo de las décadas, se busca analizar si realmente existe un desequilibrio sostenido o si los cambios de superioridad son cíclicos. Esta cuestión resulta relevante, ya que en los últimos años existe la creencia popular de que se debería eliminar el sistema de conferencias para equilibrar el nivel competitivo de los playoffs,
+
+En el Bloque 1 se parte de un archivo JSON con resultados de partidos desde 1985 hasta 2013. A este se le realizan las pertinentes transformaciones para construir un dataframe explotable, identificando los ganadores y clasificándolos por conferencia y año.\
+
+El Bloque 2 amplía el análisis con información reciente obtenida a través de dos vías: la API pública API-BASKETBALL mediante el paquete `httr`, y la librería `nbastatR`, que automatiza las llamadas a la API oficial de la NBA. Con el uso de las API conseguimos los datos de las temporadas desde 2014 hasta la 2025\
+
+Finalmente, el Bloque 3 incorpora predicciones de victorias para la temporada 2025–26 obtenidas mediante extracción web en Excel, lo que permite comparar la evolución histórica con las proyecciones futuras.
+
+## Bloque 1: Datos históricos en formato JSON
+
+El proceso comienza con la carga de las librerías necesarias para este trabajo, para darle paso a la importación y exploración del archivo JSON mediante la función `fromJSON()` del paquete `jsonlite` y usamos la funcion `str()` para ver la estructura de estos datos
+
+```{r, message=FALSE, warning=F}
+library(jsonlite)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(lubridate)
+library(ggplot2)
+library(httr)
+library(devtools)
+library(readxl)
+
+```
+
+```{r}
+nba_raw <- fromJSON("nba.json")
+head(nba_raw)
+```
+
+Podemos ver que los datos estan divididos en 3 columnas, la primera es *id* que es la clave de cada partido, luego *teams* que es una lista de dataframes, uno por cada partido en el que vienen diferentes variables como el nombre de los equipos, los puntos de cada uno,... Por último tenemos la fecha y hora de cada partido.
+
+Para nuestro análisis requerimos por cada partido: la fecha (el año más específicamente), los nombres de los equipos, la puntuación de cada uno y el ganador, para ello usaremos este código.
+
+```{r}
+
+# Proporcionado por chatgpt esta primera parte
+nba_flat <- nba_raw %>%
+  mutate(
+    home_team  = map_chr(teams, ~ .x$name[.x$home == TRUE]),
+    away_team  = map_chr(teams, ~ .x$name[.x$home == FALSE]),
+    home_score = map_int(teams, ~ .x$score[.x$home == TRUE]),
+    away_score = map_int(teams, ~ .x$score[.x$home == FALSE]))
+
+nba_flat <- nba_flat %>% 
+  select(date, home_team, away_team, home_score, away_score)
+
+nba_flat <- nba_flat %>%
+  mutate(year = year(as.Date(date)))
+
+nba_clean <- nba_flat %>%
+  mutate(
+    winner = ifelse(home_score > away_score, home_team, away_team))
+
+head(nba_clean)
+```
+
+Como se puede observar ya tenemos los ganadores de cada partido, así que ahora haremos una lista con los nombres de los equipos y su conferencia para juntarlo con nuestro dataframe explotable, para así poder analizar la dominancia de cada conferencia.
+
+```{r, message=F}
+conference_map <- tibble(
+  team = c(
+    # --- Conferencia Este ---
+    "Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "New Jersey Nets",
+    "Charlotte Hornets", "Charlotte Bobcats", "Chicago Bulls", "Cleveland Cavaliers",
+    "Detroit Pistons", "Indiana Pacers", "Miami Heat", "Milwaukee Bucks",
+    "New York Knicks", "Orlando Magic", "Philadelphia 76ers",
+    "Toronto Raptors", "Washington Bullets", "Washington Wizards",
+    
+    # --- Conferencia Oeste ---
+    "Dallas Mavericks", "Denver Nuggets", "Golden State Warriors", "Houston Rockets",
+    "Los Angeles Clippers", "Los Angeles Lakers", "Memphis Grizzlies",
+    "Minnesota Timberwolves", "New Orleans Hornets", "New Orleans/Oklahoma City Hornets",
+    "Oklahoma City Thunder", "Phoenix Suns", "Portland Trail Blazers",
+    "Sacramento Kings", "San Antonio Spurs", "Seattle SuperSonics",
+    "Utah Jazz", "Vancouver Grizzlies"
+  ),
+  conference = c(
+    rep("East", 18),
+    rep("West", 18)
+  )
+)
+
+nba_conf <- nba_clean %>%
+  left_join(conference_map, by = c("winner" = "team"))
+
+conf_summary_year <- nba_conf %>%
+  group_by(year, conference) %>%
+  summarise(total_wins = n())
+```
+
+```{r}
+head(conf_summary_year)
+```
+
+Con este último paso, ya podemos pasar a analizar el equilibrio histórico entre conferencias, mediante una visualización de las victorias de cada conferencia desde el 1985 hasta el 2013.
+
+```{r}
+ggplot(conf_summary_year, aes(x = year, y = total_wins, color = conference)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.5) +
+  labs(
+    title = "Evolución de victorias por conferencia",
+    x = "Año",
+    y = "Número de victorias"
+  ) +
+  theme_minimal()
+
+```
+
+En el gráfico se pueden ver dos líneas una de color rojo que representa a la conferencia Este y otra que representa a la conferencia Oeste. Estas nos indican que durante la decada de los 90 hubo un claro dominio de la conferencia Este (esta década es recordada por los "Bad Boy" Pistons y los Chicago Bulls de Michael Jordan, ambos equipos del este) y que a partir de los 2000 se ve que domina el Oeste (la decada de los 2000 se caracteriza por los Lakers de Shaquille O'neal y Kobe Bryant y los San Antonio Spurs de Tim Duncan)
+
+## **Bloque 2: Extracción de datos mediante APIs**
+
+En este bloque ampliamos el análisis con datos más recientes utilizando dos métodos distintos de conexión con APIs.
+
+### Parte 1: Petición http
+
+Para ello, en esta primera parte se emplea la API pública de API-BASKETBALL, en la que hay que registrarse para que te den una API KEY. En R la usamos mediante el paquete `httr`, que nos permite construir peticiones HTTP personalizadas y procesar la respuesta JSON recibida.
+
+En nuestro caso definimos en la query la temporada que queremos y el argumento `league = "12"` que señaliza que queremos la NBA. Añadimos la API KEY de nuestra cuenta y conseguimos los datos
+
+```{r}
+url <- "https://v1.basketball.api-sports.io/games"
+
+
+query <- list(
+  league = "12",
+  season = "2023-2024"
+)
+
+response <- VERB("GET", url,
+                 add_headers(
+                   "x-apisports-key" = "201974cbb3a3b5cfe19e5bbeb27179c2"
+                 ),
+                 query = query
+)
+
+# Leer respuesta
+data_json <- content(response, "text", encoding = "UTF-8")
+data_parsed <- fromJSON(data_json, flatten = TRUE)
+
+```
+
+\
+Con este código conseguimos una lista de 5 elementos, el más importante el dataframe de 38 variables y 1377 observaciones donde están los partidos, pero al igual que antes, para nuestro análisis necesitamos los nombres de los equipos, su puntuación para ver el ganador y la fecha. Por ello, vamos a seleccionar solo estas variables del dataframe anterior, y a realizar las transformaciones necesarias.
+
+```{r, message=FALSE}
+df_games <- as.data.frame(data_parsed$response) %>%
+  select(
+    date = date,
+    home_team = teams.home.name,
+    away_team = teams.away.name,
+    home_score = scores.home.total,
+    away_score = scores.away.total
+  )
+
+
+# volvemos a hacer el proceso de ganador y dividirlos por conferencia
+
+nba_clean2 <- df_games %>%
+  mutate(
+    winner = ifelse(home_team > away_team, home_team, away_team)
+  )
+
+conference_map2 <- tibble(
+  team = c(
+    "Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "Charlotte Hornets",
+    "Chicago Bulls", "Cleveland Cavaliers", "Detroit Pistons", "Indiana Pacers",
+    "Miami Heat", "Milwaukee Bucks", "New York Knicks", "Orlando Magic",
+    "Philadelphia 76ers", "Toronto Raptors", "Washington Wizards",  # EAST
+    "Dallas Mavericks", "Denver Nuggets", "Golden State Warriors", "Houston Rockets",
+    "Los Angeles Clippers", "Los Angeles Lakers", "Memphis Grizzlies",
+    "Minnesota Timberwolves", "New Orleans Pelicans", "Oklahoma City Thunder",
+    "Phoenix Suns", "Portland Trail Blazers", "Sacramento Kings", "San Antonio Spurs",
+    "Utah Jazz"  # WEST
+  ),
+  conference = c(rep("East", 15), rep("West", 15))
+)
+
+# el mapa de conferencias cambia ya que antes había que meter franquicias antiguas que no existen a día de hoy
+
+nba_conf2 <- nba_clean2 %>%
+  left_join(conference_map2, by = c("winner" = "team"))
+
+nba_conf2 <- nba_conf2 %>%
+  mutate(year = year(as.Date(date)))
+
+conf_summary_year2 <- nba_conf2 %>%
+  group_by(year, conference) %>%
+  summarise(total_wins = n())
+```
+
+```{r}
+conf_summary_year2
+```
+
+Podemos ver que hay un NA en nuestra tabla final, vamos a ver a qué se debe, para ello usaremos este código de trata de errores
+
+```{r}
+any(is.na(conf_summary_year2))
+```
+
+```{r}
+colSums(is.na(conf_summary_year2))
+```
+
+```{r}
+conf_summary_year2[!complete.cases(conf_summary_year2), ]    # Partido ALL STAR
+```
+
+Tras la trata de errores podemos ver la que la observación NA se trata del partido de ALL-Star organizado cada año por la NBA y que decidimos no contar para nuestro análisis ya que se trata de un partido más recreacional y no tan competitivo.
+
+```{r}
+conf_summary_year2 <- conf_summary_year2 %>% drop_na(conference)
+```
+
+### Parte 2: Librería nbastatR
+
+En esta seguda parte usamos una librería de R `nbastatR` que actúa como cliente de la API oficial de la NBA.
+
+A diferencia del método anterior, aquí no necesitamos construir manualmente las peticiones HTTP ni procesar el JSON: la librería se encarga internamente de comunicarse con la API, descargar los datos y devolver un dataframe listo para analizar.
+
+Código de descarga del paquete: `devtools::install_github("abresler/nbastatR", force = TRUE)`
+
+```{r, warning=FALSE}
+library(nbastatR)
+
+# código creado por chatGPT
+temporadas <- setdiff(2014:2025, 2024)
+
+# Creamos una lista vacía para guardar los resultados
+lista_resultados <- list()
+
+# Bucle para obtener los datos de cada temporada
+for (season in temporadas) {
+  cat("Descargando temporada:", season, "\n")  # Mensaje de progreso
+  lista_resultados[[as.character(season)]] <- game_logs(
+    seasons = season,
+    result_types = "team"
+  )
+}
+
+# Unir todos los dataframes en uno solo
+games_api_all <- bind_rows(lista_resultados)
+
+head(games_api_all)
+
+```
+
+Al cargar los datos, nos encontramos con un dataframe de 26418 observaciones, lo cual significaría unos 2800 partidos por temporada, casi el doble que nuestro dataframe de la temporada anterior, y si nos fijamos en los resultados de la funcion `head()`, vemos que en la columna *idgame* hay 2 observaciones por cada partido.
+
+Ante este nuevo formato, decidimos quedarnos solo con las observaciones de victoria, usando la columna con valor bool de *isWin*, reduciendo así las filas del dataframe a la mitad.
+
+```{r}
+nba_api2 <- games_api_all[games_api_all$isWin == T,]
+```
+
+En este punto volvemos a tener que hacer la misma transformación que en los dos últimos dataframes, quedarnos con las variables que nos interesan, añadir la columna de conferencias y contar las victorias de cada una.
+
+```{r, message=F}
+nba_api2 <- nba_api2 %>% 
+  select(
+    year = yearSeason,
+    winner = nameTeam)
+
+nba_conf3 <- nba_api2 %>%
+  left_join(conference_map2, by = c("winner" = "team"))
+
+conf_summary_year3 <- nba_conf3 %>%
+  group_by(year, conference) %>%
+  summarise(total_wins = n())
+
+```
+
+```{r}
+conf_summary_year3
+```
+
+Vemos que en este caso volvemos a tener valores NA, pero esta vez es un NA que se repite prácticamente todos los años. Para ver de qué se trata, volvemos a usar el codigo de trata de errores.
+
+```{r}
+colSums(is.na(nba_conf3))
+```
+
+```{r}
+nba_conf3[!complete.cases(nba_conf3), ]
+```
+
+Podemos ver que las observaciones con NA son del equipo Charlote Bobcats y LA Clippers. Las razones no son muy distintas, los Charlotte Bobcats hasta 2014 no renuevan la franquicia en la hoy es conocido como los Charlotte Hornets, mientras que para los Clippers el error reside en que a partir de 2016 deciden llamarse LA Clippers en vez de Los Angeles Clippers, por lo tanto para resolver estos problemas tenemos que añadir a los Charlotte Bobcats y a los LA Clippers en el mapa de conferencias.
+
+```{r, message=F}
+conference_map3 <- tibble(
+  team = c(
+    "Atlanta Hawks", "Boston Celtics", "Brooklyn Nets","Charlotte Bobcats", "Charlotte Hornets",
+    "Chicago Bulls", "Cleveland Cavaliers", "Detroit Pistons", "Indiana Pacers",
+    "Miami Heat", "Milwaukee Bucks", "New York Knicks", "Orlando Magic",
+    "Philadelphia 76ers", "Toronto Raptors", "Washington Wizards",  # EAST
+    "Dallas Mavericks", "Denver Nuggets", "Golden State Warriors", "Houston Rockets",
+    "LA Clippers","Los Angeles Clippers", "Los Angeles Lakers", "Memphis Grizzlies",
+    "Minnesota Timberwolves", "New Orleans Pelicans", "Oklahoma City Thunder",
+    "Phoenix Suns", "Portland Trail Blazers", "Sacramento Kings", "San Antonio Spurs",
+    "Utah Jazz"  # WEST
+  ),
+  conference = c(rep("East", 16), rep("West", 16))
+)
+
+nba_conf3 <- nba_api2 %>%
+  left_join(conference_map3, by = c("winner" = "team"))
+
+conf_summary_year3 <- nba_conf3 %>%
+  group_by(year, conference) %>%
+  summarise(total_wins = n())
+```
+
+```{r}
+conf_summary_year3
+```
+
+El análisis de estos resultados se hará junto a los del bloque 3 y en comparación a los del bloque 1 para obtener unas conclusiones más pertinentes y definitivas.
+
+## Bloque 3: Datos Web
+
+En el tercer bloque se completa el análisis incorporando predicciones de victorias por equipo para la temporada 2025–2026, obtenidas mediante extracción web.\
+
+Para ello se utilizó la herramienta Excel con la función *Obtener datos de la web*, que permite importar tablas directamente desde páginas de predicciones deportivas, en nuestro caso de DraftKings Sportsbook.
+
+Adjunto foto de los cambios realizados a la tabla base, hasta la tabla final que luego usamos en R.
+
+![](images/clipboard-1193962047.png)
+
+![](images/clipboard-500893731.png)
+
+Esta tabla es la que cargamos, con dos variables: el nombre del equipo y las victorias esperadas para esta próxima temporada.
+
+```{r}
+library(readxl)
+prac1 <- read_excel("prac1.xlsx")
+```
+
+A partir de aquí volvemos a hacerle la misma transformación que al resto de dataframes, añadir la columna de conferencias (y en este caso la columna del año también) y contar las victorias de cada una.
+
+```{r, message=F}
+nba_conf4 <- prac1 %>%
+  left_join(conference_map2, by = c("TeamName" = "team"))
+
+nba_conf4 <- nba_conf4 %>% 
+  mutate (year = 2026)
+
+nba_conf4$ExpectedWin <- as.double(nba_conf4$ExpectedWin)
+
+conf_summary_year4 <- nba_conf4 %>%
+  group_by(year, conference) %>%
+  summarise(total_wins = sum(ExpectedWin))
+```
+
+```{r}
+conf_summary_year4
+```
+
+Con este último año ya limpio y explotable, podemos pasar a la elaboración de la gráfica final donde podremos comparar nuestros datos históricos con nuestros datos actuales y así poder ver si ha habido una superioridad sostenida de alguna conferencia.
+
+## Conclusiones
+
+```{r}
+
+conf_summary_year$fuente <- "Histórico"
+conf_summary_year2$fuente <- "API"
+conf_summary_year3$fuente <- "API"
+conf_summary_year4$fuente <- "Predicción 2026"
+
+conf_all <- bind_rows(conf_summary_year, conf_summary_year2, conf_summary_year3, conf_summary_year4)
+
+ggplot(conf_all, aes(x = year, y = total_wins, 
+                     color = conference, linetype = fuente, group = interaction(conference, fuente))) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2, alpha = 0.9) +
+  scale_color_manual(values = c("East" = "#1F77B4", "West" = "#D62728")) +
+  scale_linetype_manual(values = c("Histórico" = "solid", 
+                                   "API" = "dotted",
+                                   "Predicción 2026" = "dashed")) +
+  labs(
+    title = "Evolución de victorias por conferencia (1985–2026)",
+    subtitle = "Datos históricos, APIs recientes y predicción futura",
+    x = "Temporada",
+    y = "Total de victorias",
+    color = "Conferencia",
+    linetype = "Fuente de datos"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40"),
+    legend.position = "top",
+    legend.box = "horizontal",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+En esta gráfica podemos observar la evolución del número total de victorias por conferencia desde 1985 hasta 2026, integrando los datos históricos, las temporadas más recientes obtenidas a través de APIs y las proyecciones futuras. La línea azul representa a la Conferencia Este y la roja a la Conferencia Oeste.
+
+En términos generales, el gráfico muestra cómo el equilibrio competitivo entre conferencias se ha ido ajustando progresivamente en los últimos años. Tras las etapas de dominio ya comentadas, en los 90 el este de Michael Jordan y en los 2000 los Lakers de Shaq, la década de 2010 marca un punto de inflexión en el que el Oeste, aunque sigue mostrando cierta ventaja, comienza a perder parte de su superioridad. Durante este periodo, el nivel medio de los equipos del Este mejora de forma notable con la irrupción de franquicias como Milwaukee Bucks, Boston Celtics o Miami Heat, que devuelven competitividad a la conferencia.
+
+A partir de 2020 la tendencia es todavía más clara: el número de victorias entre ambas conferencias se mantiene muy próximo, reflejando una distribución más equitativa del talento en la liga.
+
+Las temporadas más recientes obtenidas mediante la API (2024 y 2025) refuerzan esta idea, mostrando una paridad casi total en los resultados. Finalmente, la predicción para la temporada 2025–26 apunta a una continuidad en este equilibrio, sin indicios de dominio sostenido por parte de ninguna conferencia.
+
+No obstante sí que podemos ver que desde el 2000 hasta la actualidad, la conferencia Oeste es más fuerte que la Este, ya sea por mayor margen (decada 2000) o por menor. Esto se puede deber a que algunas de las franquicias más famosas y con más fans de los últimos años se encuentran en la conferencia Oeste, por ejemplo, Los Angeles Lakers o los San Antonio Spurs, por lo tanto a la NBA le interesa que estos sean equipos fuertes que pelean por el título.
+
+En conclusión, el gráfico confirma la hipótesis inicial: el dominio entre conferencias no ha sido constante, sino cíclico, alternándose a lo largo de los años. Actualmente, la NBA parece encontrarse en una etapa de estabilidad competitiva, en la que la diferencia entre Este y Oeste es pequeña. Este comportamiento nos lleva a concluir que la opinión general de que se debería eliminar el sistema de conferencias no está sustentando en una diferencia de conferencias sino en otros factores que podrían ser investigados en otro estudio.
+
+## Bibliografía
+
+R Core Team. (2024). *R: A language and environment for statistical computing* \[Software\]. R Foundation for Statistical Computing. https://www.r-project.org/
+
+RStudio Team. (2024). *RStudio: Integrated Development Environment for R* \[Software\]. Posit Software, PBC. https://posit.co/products/open-source/rstudio/
+
+OpenAI. (2025). *ChatGPT (GPT-5)* \[Large language model\]. OpenAI. <https://chat.openai.com/>
+
+Bttmly. (n.d.). *NBA Teams dataset (teams.json)* \[Data file\]. GitHub. <https://github.com/bttmly/nba/blob/master/data/teams.json>
+
+API-SPORTS. (n.d.). *API-Basketball* \[Web API\]. RapidAPI. <https://rapidapi.com/api-sports/api/api-basketball>
+
+DraftKings Sportsbook. (2025). *NBA win total predictions for the 2025–26 season* \[Data set\]. https://sportsbook.draftkings.com/
+
+Abresler, J. (n.d.). *nbastatR: Access NBA data using R* \[R package\]. GitHub. <https://github.com/abresler/nbastatR>
