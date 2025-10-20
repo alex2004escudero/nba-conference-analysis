@@ -24,5 +24,5 @@ R (Quarto) · Excel (Power Query)
 - Paridad creciente desde 2020  
 
 ## 🔗 Enlaces
-- [Visualización y resumen en Notion](https://tuenlacedetuportfolio.notion.site)
+- https://www.notion.so/Portfolio-de-Alejandro-6e1093c6146a4f648263a4f243777c60?source=copy_link
 
